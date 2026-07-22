@@ -965,7 +965,7 @@ const valueLabelsPlugin = {
             ctx.textAlign='center'; ctx.textBaseline='middle';
             drawLabelWithHalo(ctx, text, el.x, (top+bottom)/2, true);
           } else {
-            if(segH < 10) return;
+            // barra no apilada: siempre se etiqueta, sin importar qué tan corta sea la barra.
             ctx.textAlign='left'; ctx.textBaseline='middle';
             drawLabelWithHalo(ctx, text, el.x, top - 6, true);
           }
@@ -2093,7 +2093,7 @@ function buildReportData(){
           ? empBy.slice(0,8).map(([e,v])=>`${e}: ${fmtCOP(v)}`).concat(empBy.length>8?[`+${empBy.length-8} más`]:[])
           : [ cellRows[0]&&cellRows[0].tercero ? cellRows[0].tercero : '—' ];
         anomalies.push({
-          mes: monthKeyLabel(yearKeys[i]), cmayor: cm, cuenta: cu, importe: values[i],
+          kind: 'rise', mes: monthKeyLabel(yearKeys[i]), cmayor: cm, cuenta: cu, importe: values[i],
           pctChange, proy: proySet.length===1?proySet[0]:(proySet.length+' proyectos'),
           personalList, cellRows,
         });
@@ -2101,30 +2101,41 @@ function buildReportData(){
     });
   });
   anomalies.sort((a,b)=>b.importe-a.importe);
+  const risesCapped = anomalies.slice(0,8);
 
   // Caída sostenida de ingresos totales (usa el año completo, igual que las anomalías de costo,
-  // y solo se reporta si el mes de la caída cae dentro del rango de meses elegido).
+  // y solo se reporta si el mes de la caída cae dentro del rango de meses elegido). Se agrega
+  // a la misma tabla que las alzas, marcada como "kind:'drop'" para distinguirla visualmente.
   const yearIngS = yearKeys.map(k=> -yearRows.filter(r=>monthKey(r)===k && r.eri==='01 Ingresos').reduce((s,r)=>s+r.importe,0));
   const ingTrim = trimIncompleteMonth(yearKeys, yearIngS);
-  let ingresoDrop = null;
+  const dropRows = [];
   if(ingTrim.keys.length>=3){
     const d = detectSustainedDrop(ingTrim.values);
     if(d.dropped && (!months || months.has(parseInt(ingTrim.keys[d.atIndex].split('-')[1],10)))){
-      ingresoDrop = { mes: monthKeyLabel(ingTrim.keys[d.atIndex]), fromValue: d.fromValue, pctDrop: d.pctDrop };
+      const dropKey = ingTrim.keys[d.atIndex];
+      const cellRows = yearRows.filter(r=>r.eri==='01 Ingresos' && monthKey(r)===dropKey);
+      const proySet = [...new Set(cellRows.map(r=>r.proy))];
+      dropRows.push({
+        kind: 'drop', mes: monthKeyLabel(dropKey), cmayor: 'INGRESOS', cuenta: 'Ingresos (total)',
+        importe: d.fromValue, pctDrop: d.pctDrop,
+        proy: proySet.length===1?proySet[0]:(proySet.length?proySet.length+' proyectos':'—'),
+        personalList: [`Cayeron ${d.pctDrop.toFixed(0)}% (de ${fmtCOP(d.fromValue)} COP/mes) y no se recuperaron en el resto del periodo`],
+        cellRows,
+      });
     }
   }
 
   // Categorías (cmayor) de costo cuyo total cayó a la mitad o menos y se quedó ahí el resto
-  // del periodo. Se excluyen las cmayor que ya aparecen en "anomalies" (saltos hacia arriba),
-  // para no narrar dos historias contradictorias sobre la misma cuenta.
+  // del periodo. Se excluyen las cmayor que ya aparecen entre las alzas, para no narrar dos
+  // historias contradictorias sobre la misma cuenta.
   const cmayorTotals = {};
   yearCostRows.forEach(r=>{
     const k = monthKey(r);
     cmayorTotals[r.cmayor] = cmayorTotals[r.cmayor] || {};
     cmayorTotals[r.cmayor][k] = (cmayorTotals[r.cmayor][k]||0) + r.importe;
   });
-  const cmayorsInRises = new Set(anomalies.map(a=>a.cmayor));
-  const categoryDrops = [];
+  const cmayorsInRises = new Set(risesCapped.map(a=>a.cmayor));
+  const categoryDropRows = [];
   Object.keys(cmayorTotals).forEach(cm=>{
     if(cmayorsInRises.has(cm)) return;
     const vals = yearKeys.map(k=>cmayorTotals[cm][k]||0);
@@ -2133,14 +2144,23 @@ function buildReportData(){
     const d = detectSustainedDrop(t.values);
     if(!d.dropped) return;
     if(months && !months.has(parseInt(t.keys[d.atIndex].split('-')[1],10))) return;
-    categoryDrops.push({ cmayor: cm, mes: monthKeyLabel(t.keys[d.atIndex]), fromValue: d.fromValue, pctDrop: d.pctDrop });
+    const dropKey = t.keys[d.atIndex];
+    const cellRows = yearCostRows.filter(r=>r.cmayor===cm && monthKey(r)===dropKey);
+    const proySet = [...new Set(cellRows.map(r=>r.proy))];
+    categoryDropRows.push({
+      kind: 'drop', mes: monthKeyLabel(dropKey), cmayor: cm, cuenta: cm,
+      importe: d.fromValue, pctDrop: d.pctDrop,
+      proy: proySet.length===1?proySet[0]:(proySet.length?proySet.length+' proyectos':'—'),
+      personalList: [`Cayó ${d.pctDrop.toFixed(0)}% (de ${fmtCOP(d.fromValue)} COP/mes) y se mantuvo bajo el resto del periodo`],
+      cellRows,
+    });
   });
-  categoryDrops.sort((a,b)=>b.fromValue-a.fromValue);
+  categoryDropRows.sort((a,b)=>b.importe-a.importe);
 
   return { year, months, scopeType, singleProy, scopeLabel: wizardScopeLabel(scopeType, singleProy),
     periodLabel: wizardMonthsLabel(months, year),
     rows, ingresos, directos, otros, totalCostos, margen, keys, ingS, costS,
-    anomalies: anomalies.slice(0,8), ingresoDrop, categoryDrops: categoryDrops.slice(0,2) };
+    anomalies: risesCapped.concat(dropRows).concat(categoryDropRows.slice(0,2)) };
 }
 
 function resultFormulaHtml(data){
@@ -2154,18 +2174,16 @@ function resultFormulaText(data){
 // Cubre: (1) el salto de costo más relevante, (2) caída sostenida de ingresos si la hay,
 // (3) categorías de costo que cayeron a la mitad o menos y se quedaron ahí, (4) el resultado neto.
 function conclusionHtml(data){
-  const topAnom = data.anomalies[0];
+  const topAnom = data.anomalies.find(a=>a.kind==='rise');
   let s = topAnom
     ? `La anomalía más relevante del periodo fue en <b>${topAnom.cuenta}</b> (${topAnom.cmayor}) durante <b>${topAnom.mes}</b>, con ${fmtCOP(topAnom.importe)} COP` +
       (topAnom.pctChange!=null ? ` (${topAnom.pctChange>=0?'+':''}${topAnom.pctChange.toFixed(0)}% vs. mes anterior)` : ' (nueva, sin mes anterior comparable)') +
       `, asociada principalmente a ${topAnom.personalList[0]}. `
     : 'No se detectaron saltos de costo estadísticamente relevantes en el periodo analizado. ';
-  if(data.ingresoDrop){
-    const d = data.ingresoDrop;
-    s += `Los ingresos cayeron ${d.pctDrop.toFixed(0)}% a partir de <b>${d.mes}</b> (venían de ${fmtCOP(d.fromValue)} COP/mes) y no se recuperaron en el resto del periodo analizado. `;
-  }
-  data.categoryDrops.forEach(cd=>{
-    s += `El costo de <b>${cd.cmayor}</b> cayó ${cd.pctDrop.toFixed(0)}% a partir de <b>${cd.mes}</b> (venía de ${fmtCOP(cd.fromValue)} COP/mes) y se mantuvo en ese nivel bajo el resto del periodo. `;
+  data.anomalies.filter(a=>a.kind==='drop').forEach(d=>{
+    s += d.cmayor==='INGRESOS'
+      ? `Los ingresos cayeron ${d.pctDrop.toFixed(0)}% a partir de <b>${d.mes}</b> (venían de ${fmtCOP(d.importe)} COP/mes) y no se recuperaron en el resto del periodo analizado. `
+      : `El costo de <b>${d.cmayor}</b> cayó ${d.pctDrop.toFixed(0)}% a partir de <b>${d.mes}</b> (venía de ${fmtCOP(d.importe)} COP/mes) y se mantuvo en ese nivel bajo el resto del periodo. `;
   });
   s += data.margen>=0
     ? `El resultado del periodo fue positivo: ${fmtCOP(data.margen)} COP.`
@@ -2193,16 +2211,17 @@ function renderReportModal(data){
   const anomHtml = data.anomalies.length ? `
     <div class="mini-table-wrap">
     <table class="mini-table" id="reportAnomTable">
-      <colgroup><col style="width:11%"><col style="width:12%"><col style="width:20%"><col style="width:auto"><col style="width:15%"></colgroup>
-      <thead><tr><th>Mes</th><th>Proyecto</th><th>Cuenta</th><th>Personal / proveedor relacionado</th><th class="num">Importe</th></tr></thead>
+      <colgroup><col style="width:8%"><col style="width:11%"><col style="width:12%"><col style="width:18%"><col style="width:auto"><col style="width:15%"></colgroup>
+      <thead><tr><th>Tipo</th><th>Mes</th><th>Proyecto</th><th>Cuenta</th><th>Detalle</th><th class="num">Importe</th></tr></thead>
       <tbody>${data.anomalies.map((a,ai)=>`<tr class="report-anom-row" data-aidx="${ai}" title="Clic para ver el detalle de este valor">
+        <td>${a.kind==='drop' ? '<span style="color:var(--accent); font-weight:700;">↓ Caída</span>' : '<span style="color:var(--danger); font-weight:700;">↑ Alza</span>'}</td>
         <td>${a.mes}</td><td>${a.proy}</td><td title="${escAttr(a.cmayor)}">${a.cuenta}</td>
         <td class="personal-list-cell">${a.personalList.map(p=>escAttr(p)).join('<br>')}</td>
-        <td class="num" style="color:var(--danger); font-weight:700;">${fmtCOP(a.importe)}</td>
+        <td class="num" style="color:${a.kind==='drop'?'var(--accent)':'var(--danger)'}; font-weight:700;">${fmtCOP(a.importe)}</td>
       </tr>`).join('')}</tbody>
     </table>
     </div>
-    <p style="font-size:11px; color:var(--muted); margin:6px 0 0;">Clic en una fila para ver el detalle de a qué corresponde ese valor.</p>` : '<p class="psum-empty">No se detectaron anomalías materiales en este alcance.</p>';
+    <p style="font-size:11px; color:var(--muted); margin:6px 0 0;">Clic en una fila para ver el detalle de a qué corresponde ese valor. Las filas "↓ Caída" muestran el nivel mensual previo a la caída, no un importe puntual.</p>` : '<p class="psum-empty">No se detectaron anomalías materiales en este alcance.</p>';
 
   const body = `
     <p style="color:var(--muted); font-size:12.5px; margin-top:0;"><b>${data.periodLabel}</b> &nbsp;·&nbsp; ${data.scopeLabel} &nbsp;·&nbsp; ${data.rows.length} movimientos</p>
@@ -2216,7 +2235,7 @@ function renderReportModal(data){
     <p style="font-size:11px; color:var(--muted); margin:4px 0 0;">${resultFormulaHtml(data)}</p>
     <h4>Tendencia</h4>
     <div class="chart-box" style="height:220px;"><canvas id="chartReport"></canvas></div>
-    <h4>⚠ Principales anomalías detectadas (saltos grandes de costo)</h4>
+    <h4>⚠ Principales anomalías detectadas (saltos grandes de costo y caídas sostenidas)</h4>
     ${anomHtml}
     <h4>Conclusiones</h4>
     <p style="font-size:12.5px; line-height:1.6;">${conclusion}</p>
@@ -2319,11 +2338,17 @@ function exportReportPDF(data){
   if(data.anomalies.length){
     doc.autoTable({
       startY: y+4, margin:{left:40,right:40},
-      head: [['Mes','Proyecto','Cuenta','Personal / proveedor','Importe (COP)']],
-      body: data.anomalies.map(a=>[ a.mes, a.proy, a.cuenta, a.personalList.join('\n'), fmtCOP(a.importe) ]),
+      head: [['Tipo','Mes','Proyecto','Cuenta','Detalle','Importe (COP)']],
+      body: data.anomalies.map(a=>[ a.kind==='drop'?'Caída':'Alza', a.mes, a.proy, a.cuenta, a.personalList.join('\n'), fmtCOP(a.importe) ]),
       styles:{fontSize:8, cellPadding:4, overflow:'linebreak', valign:'top'},
       headStyles:{fillColor:[22,29,46], textColor:255, fontStyle:'bold'},
-      columnStyles:{3:{cellWidth:180}, 4:{textColor:[214,26,52], fontStyle:'bold'}},
+      columnStyles:{4:{cellWidth:170}, 5:{fontStyle:'bold'}},
+      didParseCell: function(hookData){
+        if(hookData.section==='body' && hookData.column.index===5){
+          const isDrop = data.anomalies[hookData.row.index].kind==='drop';
+          hookData.cell.styles.textColor = isDrop ? [24,95,165] : [214,26,52];
+        }
+      },
     });
     y = doc.lastAutoTable.finalY + 20;
   } else {
