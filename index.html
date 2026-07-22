@@ -185,9 +185,17 @@ input:checked + .slider:before{transform:translateX(16px);}
 .report-anom-row:hover td{background:rgba(79,140,255,.14);}
 .btn-back-modal{background:none; border:1px solid var(--border); color:var(--text); border-radius:8px; padding:6px 12px; font-size:12px; cursor:pointer; margin-bottom:12px;}
 .btn-back-modal:hover{border-color:var(--accent); color:var(--accent);}
+.expand-btn{background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; margin-left:auto; flex-shrink:0;}
+.expand-btn:hover{border-color:var(--accent); color:var(--accent);}
+.fs-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:1100; display:none;}
+.fs-backdrop.show{display:block;}
+.panel.panel-fs{position:fixed !important; top:16px; left:16px; right:16px; bottom:16px; margin:0 !important; z-index:1200; overflow:auto; box-shadow:0 8px 40px rgba(0,0,0,.6);}
+.panel-fs .chart-box{height:calc(100vh - 220px) !important;}
+.panel-fs .tbl-scroll{max-height:calc(100vh - 190px) !important;}
 </style>
 </head>
 <body>
+<div class="fs-backdrop" id="fsBackdrop"></div>
 <div class="modal-overlay" id="modalOverlay">
   <div class="modal-box">
     <div class="modal-header">
@@ -282,12 +290,12 @@ input:checked + .slider:before{transform:translateX(16px);}
 
   <div class="grid2">
     <div class="panel">
-      <h2>Tendencia mensual — Ingresos vs Costos <span class="tag">clic en una barra/punto para ver el detalle</span></h2>
+      <h2>Tendencia mensual — Ingresos vs Costos <span class="tag">clic en una barra/punto para ver el detalle</span><button class="expand-btn" onclick="toggleFullscreenPanel(this)" title="Ampliar a pantalla completa">⤢</button></h2>
       <div class="chart-box tall"><canvas id="chartTrend"></canvas></div>
       <div id="peakNote"></div>
     </div>
     <div class="panel">
-      <h2>Costos por cuenta mayor <span class="tag" id="lblDonutTotal"></span></h2>
+      <h2>Costos por cuenta mayor <span class="tag" id="lblDonutTotal"></span><button class="expand-btn" onclick="toggleFullscreenPanel(this)" title="Ampliar a pantalla completa">⤢</button></h2>
       <div class="chart-box tall"><canvas id="chartDonut"></canvas></div>
       <div class="chart-hint">Clic en una porción para ver el desglose</div>
     </div>
@@ -295,19 +303,19 @@ input:checked + .slider:before{transform:translateX(16px);}
 
   <div class="grid2">
     <div class="panel">
-      <h2>Detalle de ingresos por concepto</h2>
+      <h2>Detalle de ingresos por concepto <button class="expand-btn" onclick="toggleFullscreenPanel(this)" title="Ampliar a pantalla completa">⤢</button></h2>
       <div class="chart-box"><canvas id="chartIngresos"></canvas></div>
       <div class="chart-hint">Clic en una barra para ver las transacciones</div>
     </div>
     <div class="panel">
-      <h2>Top cuentas de costo (detalle)</h2>
+      <h2>Top cuentas de costo (detalle) <button class="expand-btn" onclick="toggleFullscreenPanel(this)" title="Ampliar a pantalla completa">⤢</button></h2>
       <div class="chart-box"><canvas id="chartCuentas"></canvas></div>
       <div class="chart-hint">Clic en una barra para ver las transacciones</div>
     </div>
   </div>
 
   <div class="panel">
-    <h2>Costo por personal <span class="tag">clic en una barra para filtrar</span></h2>
+    <h2>Costo por personal <span class="tag">clic en una barra para filtrar</span><button class="expand-btn" onclick="toggleFullscreenPanel(this)" title="Ampliar a pantalla completa">⤢</button></h2>
     <div class="chart-box tall"><canvas id="chartEmpleados"></canvas></div>
   </div>
 
@@ -317,7 +325,7 @@ input:checked + .slider:before{transform:translateX(16px);}
   </div>
 
   <div class="panel">
-    <h2>Matriz mensual de costos por cuenta <span class="tag">clic en un valor para ver el detalle (personal, transacciones, variación vs. mes anterior) · anomalías resaltadas en rojo</span></h2>
+    <h2>Matriz mensual de costos por cuenta <span class="tag">clic en un valor para ver el detalle (personal, transacciones, variación vs. mes anterior) · anomalías resaltadas en rojo</span><button class="expand-btn" onclick="toggleFullscreenPanel(this)" title="Ampliar a pantalla completa">⤢</button></h2>
     <div class="tbl-scroll">
       <table id="pivotTable"></table>
     </div>
@@ -873,35 +881,79 @@ let charts = {};
 function destroyChart(k){ if(charts[k]){ charts[k].destroy(); delete charts[k]; } }
 const CHART_COLORS = ['#4f8cff','#22c58b','#ffb648','#ff5c72','#a78bfa','#38bdf8','#f472b6','#facc15','#34d399','#fb923c','#818cf8','#f87171'];
 
-// Plugin propio (sin librería externa) para dibujar la etiqueta de dato encima de cada
-// barra/punto. Se activa por gráfica con options.plugins.valueLabels = { enabled:true, datasets:[...] }
-// datasets: lista opcional de índices de dataset a etiquetar (si se omite, se etiquetan todos).
+// Plugin propio (sin librería externa) para dibujar la etiqueta de dato en cada
+// barra/punto/porción. Se activa por gráfica con options.plugins.valueLabels = { enabled:true, ... }
+// Soporta: línea (arriba del punto), barra vertical (arriba, o centrada si es un segmento
+// apilado con altura suficiente), barra horizontal (a la derecha, o dentro si no cabe),
+// y dona/pie (porcentaje centrado en la porción, solo si es lo bastante grande para leerse).
 const valueLabelsPlugin = {
   id: 'valueLabels',
   afterDatasetsDraw(chart){
     const cfg = chart.config.options && chart.config.options.plugins && chart.config.options.plugins.valueLabels;
     if(!cfg || !cfg.enabled) return;
     const ctx = chart.ctx;
+    const isHorizontal = chart.options.indexAxis === 'y';
     ctx.save();
     ctx.font = '700 11px system-ui, -apple-system, Segoe UI, sans-serif';
-    ctx.textAlign = 'center';
     chart.data.datasets.forEach((ds, dsIndex)=>{
       if(cfg.datasets && !cfg.datasets.includes(dsIndex)) return;
       const meta = chart.getDatasetMeta(dsIndex);
       if(!meta || meta.hidden) return;
+      const isArc = meta.type === 'doughnut' || meta.type === 'pie';
+      const isLine = meta.type === 'line';
+      const arcTotal = isArc ? ds.data.reduce((s,v)=>s+Math.abs(v||0),0) : 0;
       meta.data.forEach((el, i)=>{
         const raw = ds.data[i];
         if(raw===undefined || raw===null || raw===0) return;
+
+        if(isArc){
+          const pct = arcTotal ? Math.abs(raw)/arcTotal*100 : 0;
+          const minPct = cfg.minPercent!=null ? cfg.minPercent : 3;
+          if(pct < minPct) return;
+          const angle = (el.startAngle + el.endAngle)/2;
+          const rad = (el.innerRadius + el.outerRadius)/2;
+          ctx.textAlign='center'; ctx.textBaseline='middle';
+          ctx.fillStyle = cfg.arcColor || '#0f1420';
+          ctx.fillText(pct.toFixed(0)+'%', el.x + Math.cos(angle)*rad, el.y + Math.sin(angle)*rad);
+          return;
+        }
+
         const text = fmtCOPShort(raw);
-        const isLine = meta.type === 'line';
-        ctx.fillStyle = cfg.color || '#e8ecf5';
         if(isLine){
-          ctx.textBaseline = 'bottom';
+          ctx.textAlign='center'; ctx.textBaseline='bottom';
+          ctx.fillStyle = cfg.color || '#e8ecf5';
           ctx.fillText(text, el.x, el.y - 8);
+        } else if(isHorizontal){
+          // soporta barras negativas (que crecen hacia la izquierda del cero): la etiqueta
+          // se ubica del lado de la punta de la barra, no siempre a la derecha.
+          const neg = raw < 0;
+          const base = el.base!==undefined ? el.base : el.x;
+          const tip = neg ? Math.min(el.x, base) : Math.max(el.x, base);
+          const room = neg ? (tip - chart.chartArea.left) : (chart.chartArea.right - tip);
+          ctx.textBaseline='middle';
+          if(room > 55){
+            ctx.textAlign = neg ? 'right' : 'left';
+            ctx.fillStyle = cfg.color || '#e8ecf5';
+            ctx.fillText(text, neg ? tip-6 : tip+6, el.y);
+          } else {
+            ctx.textAlign = neg ? 'left' : 'right';
+            ctx.fillStyle = cfg.insideColor || '#0f1420';
+            ctx.fillText(text, neg ? tip+6 : tip-6, el.y);
+          }
         } else {
           const top = Math.min(el.y, el.base!==undefined ? el.base : el.y);
-          ctx.textBaseline = 'bottom';
-          ctx.fillText(text, el.x, top - 4);
+          const bottom = Math.max(el.y, el.base!==undefined ? el.base : el.y);
+          const segH = bottom - top;
+          ctx.textAlign='center';
+          if(ds.stack){
+            if(segH < 18) return; // segmento muy angosto: se omite para no encimarse con el vecino
+            ctx.textBaseline='middle'; ctx.fillStyle = cfg.insideColor || '#0f1420';
+            ctx.fillText(text, el.x, (top+bottom)/2);
+          } else {
+            if(segH < 10) return;
+            ctx.textBaseline='bottom'; ctx.fillStyle = cfg.color || '#e8ecf5';
+            ctx.fillText(text, el.x, top - 4);
+          }
         }
       });
     });
@@ -909,6 +961,44 @@ const valueLabelsPlugin = {
   }
 };
 Chart.register(valueLabelsPlugin);
+
+// ---------- ampliar panel a pantalla completa ----------
+const CHART_KEY_BY_CANVAS = {chartTrend:'trend', chartDonut:'donut', chartIngresos:'ingresos', chartCuentas:'cuentas', chartEmpleados:'empleados'};
+function collapseFullscreenPanel(panel){
+  panel.classList.remove('panel-fs');
+  const btn = panel.querySelector('.expand-btn');
+  if(btn) btn.textContent = '⤢';
+  document.getElementById('fsBackdrop').classList.remove('show');
+  const canvas = panel.querySelector('canvas');
+  if(canvas){
+    const key = CHART_KEY_BY_CANVAS[canvas.id];
+    if(key && charts[key]) setTimeout(()=>charts[key].resize(), 60);
+  }
+}
+function toggleFullscreenPanel(btn){
+  const panel = btn.closest('.panel');
+  const wasFs = panel.classList.contains('panel-fs');
+  document.querySelectorAll('.panel.panel-fs').forEach(p=>{ if(p!==panel) collapseFullscreenPanel(p); });
+  if(wasFs){ collapseFullscreenPanel(panel); return; }
+  panel.classList.add('panel-fs');
+  btn.textContent = '✕';
+  document.getElementById('fsBackdrop').classList.add('show');
+  const canvas = panel.querySelector('canvas');
+  if(canvas){
+    const key = CHART_KEY_BY_CANVAS[canvas.id];
+    if(key && charts[key]) setTimeout(()=>charts[key].resize(), 60);
+  }
+}
+document.getElementById('fsBackdrop').addEventListener('click', ()=>{
+  const p = document.querySelector('.panel.panel-fs');
+  if(p) collapseFullscreenPanel(p);
+});
+document.addEventListener('keydown', (e)=>{
+  if(e.key==='Escape'){
+    const p = document.querySelector('.panel.panel-fs');
+    if(p) collapseFullscreenPanel(p);
+  }
+});
 
 // metadata captured per render, used by chart click handlers to know what was clicked
 let trendMeta = null;   // {keys, labels, ing, dir, otr, totalCost, rows}
@@ -1449,7 +1539,7 @@ function renderTrend(rows){
       plugins:{
         legend:{labels:{color:'#e8ecf5', boxWidth:12, font:{size:11.5}}},
         tooltip:{callbacks:{label: c => c.dataset.label+': '+fmtCOP(c.raw)+' COP'+(trendMeta.outliers[c.dataIndex] && c.dataset.label!=='Ingresos' ? ' ⚠ pico' : '')}},
-        valueLabels:{enabled:true, datasets:[0,3], color:'#e8ecf5'}
+        valueLabels:{enabled:true, color:'#e8ecf5'}
       },
       scales:{
         x:{ticks:{color:'#93a0bd'}, grid:{color:'#2a3350'}},
@@ -1507,7 +1597,8 @@ function renderDonut(rows){
       },
       plugins:{
         legend:{position:'right', labels:{color:'#e8ecf5', boxWidth:11, font:{size:11}}},
-        tooltip:{callbacks:{label: c => c.label+': '+fmtCOP(c.raw)+' COP ('+(total?(c.raw/total*100).toFixed(1):'0')+'%)'}}
+        tooltip:{callbacks:{label: c => c.label+': '+fmtCOP(c.raw)+' COP ('+(total?(c.raw/total*100).toFixed(1):'0')+'%)'}},
+        valueLabels:{enabled:true, minPercent:3}
       }
     }
   });
@@ -1525,10 +1616,11 @@ function renderIngresos(rows){
     type:'bar',
     data:{
       labels: entries.map(e=>e[0]),
-      datasets:[{label:'Ingreso neto', data: entries.map(e=>e[1]), backgroundColor: entries.map((e)=>e[1]>=0?'#22c58b99':'#ff5c7299'), borderRadius:4}]
+      datasets:[{label:'Ingreso neto', data: entries.map(e=>e[1]), backgroundColor: entries.map((e)=>e[1]>=0?'#22c58be6':'#ff5c72e6'), borderRadius:4}]
     },
     options:{
       indexAxis:'y', responsive:true, maintainAspectRatio:false,
+      layout:{padding:{right:60, left:60}},
       onClick:(evt, elements)=>{
         if(!elements.length) return;
         const idx = elements[0].index;
@@ -1536,7 +1628,7 @@ function renderIngresos(rows){
         const cellRows = ingresosMeta.rows.filter(r=>r.cuenta===cuenta);
         openBreakdownModal(`Ingresos — ${cuenta}`, cellRows);
       },
-      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtCOP(c.raw)+' COP'}}},
+      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtCOP(c.raw)+' COP'}}, valueLabels:{enabled:true}},
       scales:{
         x:{ticks:{color:'#93a0bd', callback:v=>fmtCOPShort(v)}, grid:{color:'#2a3350'}},
         y:{ticks:{color:'#93a0bd', font:{size:10.5}}, grid:{display:false}}
@@ -1557,10 +1649,11 @@ function renderCuentas(rows){
     type:'bar',
     data:{
       labels: entries.map(e=>e[0]),
-      datasets:[{label:'Costo', data: entries.map(e=>e[1]), backgroundColor:'#4f8cff99', borderRadius:4}]
+      datasets:[{label:'Costo', data: entries.map(e=>e[1]), backgroundColor:'#4f8cffe6', borderRadius:4}]
     },
     options:{
       indexAxis:'y', responsive:true, maintainAspectRatio:false,
+      layout:{padding:{right:60}},
       onClick:(evt, elements)=>{
         if(!elements.length) return;
         const idx = elements[0].index;
@@ -1568,7 +1661,7 @@ function renderCuentas(rows){
         const cellRows = cuentasMeta.rows.filter(r=>r.cuenta===cuenta);
         openBreakdownModal(`Costos — ${cuenta}`, cellRows);
       },
-      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtCOP(c.raw)+' COP'}}},
+      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtCOP(c.raw)+' COP'}}, valueLabels:{enabled:true}},
       scales:{
         x:{ticks:{color:'#93a0bd', callback:v=>fmtCOPShort(v)}, grid:{color:'#2a3350'}},
         y:{ticks:{color:'#93a0bd', font:{size:10.5}}, grid:{display:false}}
@@ -1588,10 +1681,11 @@ function renderEmpleados(rows){
     type:'bar',
     data:{
       labels: entries.map(e=>e[0]),
-      datasets:[{label:'Costo asociado', data: entries.map(e=>e[1]), backgroundColor:'#a78bfa99', borderRadius:4}]
+      datasets:[{label:'Costo asociado', data: entries.map(e=>e[1]), backgroundColor:'#a78bfae6', borderRadius:4}]
     },
     options:{
       indexAxis:'y', responsive:true, maintainAspectRatio:false,
+      layout:{padding:{right:60}},
       onClick:(evt, els)=>{
         if(els.length){
           const idx = els[0].index;
@@ -1601,7 +1695,7 @@ function renderEmpleados(rows){
           refresh();
         }
       },
-      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtCOP(c.raw)+' COP'}}},
+      plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>fmtCOP(c.raw)+' COP'}}, valueLabels:{enabled:true}},
       scales:{
         x:{ticks:{color:'#93a0bd', callback:v=>fmtCOPShort(v)}, grid:{color:'#2a3350'}},
         y:{ticks:{color:'#93a0bd', font:{size:10.5}}, grid:{display:false}}
