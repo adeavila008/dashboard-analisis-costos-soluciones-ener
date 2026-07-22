@@ -883,9 +883,26 @@ const CHART_COLORS = ['#4f8cff','#22c58b','#ffb648','#ff5c72','#a78bfa','#38bdf8
 
 // Plugin propio (sin librería externa) para dibujar la etiqueta de dato en cada
 // barra/punto/porción. Se activa por gráfica con options.plugins.valueLabels = { enabled:true, ... }
-// Soporta: línea (arriba del punto), barra vertical (arriba, o centrada si es un segmento
-// apilado con altura suficiente), barra horizontal (a la derecha, o dentro si no cabe),
-// y dona/pie (porcentaje centrado en la porción, solo si es lo bastante grande para leerse).
+// Soporta: línea (arriba del punto, vertical), barra vertical (arriba, o centrada si es un
+// segmento apilado con altura suficiente — ambas en vertical), barra horizontal (a la derecha,
+// o dentro si no cabe, en horizontal), y dona/pie (porcentaje centrado en la porción, solo si
+// es lo bastante grande para leerse). Todas las etiquetas se dibujan en blanco con un halo
+// oscuro alrededor (contorno), así se leen bien sin importar el color de fondo detrás.
+function drawLabelWithHalo(ctx, text, x, y, rotate){
+  ctx.save();
+  if(rotate){
+    ctx.translate(x, y);
+    ctx.rotate(-Math.PI/2);
+    x = 0; y = 0;
+  }
+  ctx.lineWidth = 3;
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(10,13,22,.9)';
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
 const valueLabelsPlugin = {
   id: 'valueLabels',
   afterDatasetsDraw(chart){
@@ -913,19 +930,20 @@ const valueLabelsPlugin = {
           const angle = (el.startAngle + el.endAngle)/2;
           const rad = (el.innerRadius + el.outerRadius)/2;
           ctx.textAlign='center'; ctx.textBaseline='middle';
-          ctx.fillStyle = cfg.arcColor || '#0f1420';
-          ctx.fillText(pct.toFixed(0)+'%', el.x + Math.cos(angle)*rad, el.y + Math.sin(angle)*rad);
+          drawLabelWithHalo(ctx, pct.toFixed(0)+'%', el.x + Math.cos(angle)*rad, el.y + Math.sin(angle)*rad, false);
           return;
         }
 
         const text = fmtCOPShort(raw);
         if(isLine){
-          ctx.textAlign='center'; ctx.textBaseline='bottom';
-          ctx.fillStyle = cfg.color || '#e8ecf5';
-          ctx.fillText(text, el.x, el.y - 8);
+          // rotado: 'left' ancla el inicio del texto en el punto y lo hace crecer hacia
+          // arriba; 'middle' lo deja centrado horizontalmente sobre el punto.
+          ctx.textAlign='left'; ctx.textBaseline='middle';
+          drawLabelWithHalo(ctx, text, el.x, el.y - 10, true);
         } else if(isHorizontal){
           // soporta barras negativas (que crecen hacia la izquierda del cero): la etiqueta
-          // se ubica del lado de la punta de la barra, no siempre a la derecha.
+          // se ubica del lado de la punta de la barra, no siempre a la derecha. Horizontal,
+          // sin rotar (se lee igual que las categorías del eje).
           const neg = raw < 0;
           const base = el.base!==undefined ? el.base : el.x;
           const tip = neg ? Math.min(el.x, base) : Math.max(el.x, base);
@@ -933,26 +951,23 @@ const valueLabelsPlugin = {
           ctx.textBaseline='middle';
           if(room > 55){
             ctx.textAlign = neg ? 'right' : 'left';
-            ctx.fillStyle = cfg.color || '#e8ecf5';
-            ctx.fillText(text, neg ? tip-6 : tip+6, el.y);
+            drawLabelWithHalo(ctx, text, neg ? tip-6 : tip+6, el.y, false);
           } else {
             ctx.textAlign = neg ? 'left' : 'right';
-            ctx.fillStyle = cfg.insideColor || '#0f1420';
-            ctx.fillText(text, neg ? tip+6 : tip-6, el.y);
+            drawLabelWithHalo(ctx, text, neg ? tip+6 : tip-6, el.y, false);
           }
         } else {
           const top = Math.min(el.y, el.base!==undefined ? el.base : el.y);
           const bottom = Math.max(el.y, el.base!==undefined ? el.base : el.y);
           const segH = bottom - top;
-          ctx.textAlign='center';
           if(ds.stack){
             if(segH < 18) return; // segmento muy angosto: se omite para no encimarse con el vecino
-            ctx.textBaseline='middle'; ctx.fillStyle = cfg.insideColor || '#0f1420';
-            ctx.fillText(text, el.x, (top+bottom)/2);
+            ctx.textAlign='center'; ctx.textBaseline='middle';
+            drawLabelWithHalo(ctx, text, el.x, (top+bottom)/2, true);
           } else {
             if(segH < 10) return;
-            ctx.textBaseline='bottom'; ctx.fillStyle = cfg.color || '#e8ecf5';
-            ctx.fillText(text, el.x, top - 4);
+            ctx.textAlign='left'; ctx.textBaseline='middle';
+            drawLabelWithHalo(ctx, text, el.x, top - 6, true);
           }
         }
       });
