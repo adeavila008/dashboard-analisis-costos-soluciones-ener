@@ -936,10 +936,10 @@ const valueLabelsPlugin = {
 
         const text = fmtCOPShort(raw);
         if(isLine){
-          // rotado: 'left' ancla el inicio del texto en el punto y lo hace crecer hacia
-          // arriba; 'middle' lo deja centrado horizontalmente sobre el punto.
-          ctx.textAlign='left'; ctx.textBaseline='middle';
-          drawLabelWithHalo(ctx, text, el.x, el.y - 10, true);
+          // la línea (ej. Costo total) no vive dentro de una columna angosta, así que su
+          // etiqueta se queda horizontal.
+          ctx.textAlign='center'; ctx.textBaseline='bottom';
+          drawLabelWithHalo(ctx, text, el.x, el.y - 10, false);
         } else if(isHorizontal){
           // soporta barras negativas (que crecen hacia la izquierda del cero): la etiqueta
           // se ubica del lado de la punta de la barra, no siempre a la derecha. Horizontal,
