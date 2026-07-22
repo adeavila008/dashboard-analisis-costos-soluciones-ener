@@ -1077,6 +1077,38 @@ function detectRowAnomalies(values){
   return flags;
 }
 
+// Detecta caídas sostenidas: una serie (ingresos totales, o el costo total de una categoría/
+// cmayor) que cae a la mitad o menos de su nivel previo, y se mantiene en ese nivel bajo el
+// resto del periodo (no es solo un mes puntual en cero que luego se recupera). Solo se
+// considera si la serie completa suma >=10M COP (para ignorar cuentas irrelevantes). El mes
+// actual (si aparece como último dato y probablemente esté incompleto) se excluye antes de
+// evaluar, para no confundir "el mes todavía no termina" con una caída real.
+const ANOM_DROP_MIN_TOTAL = 10000000;
+function currentMonthKey(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+}
+function trimIncompleteMonth(keys, values){
+  if(keys.length && keys[keys.length-1] === currentMonthKey()){
+    return { keys: keys.slice(0,-1), values: values.slice(0,-1) };
+  }
+  return { keys, values };
+}
+function detectSustainedDrop(values){
+  const total = values.reduce((s,v)=>s+v,0);
+  if(total < ANOM_DROP_MIN_TOTAL) return { dropped:false };
+  for(let i=1;i<values.length;i++){
+    const prev = values[i-1];
+    if(prev <= 0) continue;
+    const cur = values[i];
+    if(cur > prev*0.5) continue; // no bajó lo suficiente
+    const rest = values.slice(i);
+    if(rest.some(v => v > prev*0.5)) continue; // no se sostuvo bajo: fue un mes puntual, no un cambio de nivel
+    return { dropped:true, atIndex:i, fromValue:prev, pctDrop:(1-(cur/prev))*100 };
+  }
+  return { dropped:false };
+}
+
 // ---------- modal ----------
 const modalOverlay = document.getElementById('modalOverlay');
 document.getElementById('modalCloseBtn').onclick = closeModal;
@@ -2070,9 +2102,45 @@ function buildReportData(){
   });
   anomalies.sort((a,b)=>b.importe-a.importe);
 
+  // Caída sostenida de ingresos totales (usa el año completo, igual que las anomalías de costo,
+  // y solo se reporta si el mes de la caída cae dentro del rango de meses elegido).
+  const yearIngS = yearKeys.map(k=> -yearRows.filter(r=>monthKey(r)===k && r.eri==='01 Ingresos').reduce((s,r)=>s+r.importe,0));
+  const ingTrim = trimIncompleteMonth(yearKeys, yearIngS);
+  let ingresoDrop = null;
+  if(ingTrim.keys.length>=3){
+    const d = detectSustainedDrop(ingTrim.values);
+    if(d.dropped && (!months || months.has(parseInt(ingTrim.keys[d.atIndex].split('-')[1],10)))){
+      ingresoDrop = { mes: monthKeyLabel(ingTrim.keys[d.atIndex]), fromValue: d.fromValue, pctDrop: d.pctDrop };
+    }
+  }
+
+  // Categorías (cmayor) de costo cuyo total cayó a la mitad o menos y se quedó ahí el resto
+  // del periodo. Se excluyen las cmayor que ya aparecen en "anomalies" (saltos hacia arriba),
+  // para no narrar dos historias contradictorias sobre la misma cuenta.
+  const cmayorTotals = {};
+  yearCostRows.forEach(r=>{
+    const k = monthKey(r);
+    cmayorTotals[r.cmayor] = cmayorTotals[r.cmayor] || {};
+    cmayorTotals[r.cmayor][k] = (cmayorTotals[r.cmayor][k]||0) + r.importe;
+  });
+  const cmayorsInRises = new Set(anomalies.map(a=>a.cmayor));
+  const categoryDrops = [];
+  Object.keys(cmayorTotals).forEach(cm=>{
+    if(cmayorsInRises.has(cm)) return;
+    const vals = yearKeys.map(k=>cmayorTotals[cm][k]||0);
+    const t = trimIncompleteMonth(yearKeys, vals);
+    if(t.keys.length<3) return;
+    const d = detectSustainedDrop(t.values);
+    if(!d.dropped) return;
+    if(months && !months.has(parseInt(t.keys[d.atIndex].split('-')[1],10))) return;
+    categoryDrops.push({ cmayor: cm, mes: monthKeyLabel(t.keys[d.atIndex]), fromValue: d.fromValue, pctDrop: d.pctDrop });
+  });
+  categoryDrops.sort((a,b)=>b.fromValue-a.fromValue);
+
   return { year, months, scopeType, singleProy, scopeLabel: wizardScopeLabel(scopeType, singleProy),
     periodLabel: wizardMonthsLabel(months, year),
-    rows, ingresos, directos, otros, totalCostos, margen, keys, ingS, costS, anomalies: anomalies.slice(0,8) };
+    rows, ingresos, directos, otros, totalCostos, margen, keys, ingS, costS,
+    anomalies: anomalies.slice(0,8), ingresoDrop, categoryDrops: categoryDrops.slice(0,2) };
 }
 
 function resultFormulaHtml(data){
@@ -2080,6 +2148,32 @@ function resultFormulaHtml(data){
 }
 function resultFormulaText(data){
   return `Resultado = Ingresos - Costos Directos - Otros Costos = ${fmtCOP(data.ingresos)} - ${fmtCOP(data.directos)} - ${fmtCOP(data.otros)} = ${fmtCOP(data.margen)} COP`;
+}
+
+// Texto de conclusiones compartido entre el informe en pantalla (con <b>) y el PDF (texto plano).
+// Cubre: (1) el salto de costo más relevante, (2) caída sostenida de ingresos si la hay,
+// (3) categorías de costo que cayeron a la mitad o menos y se quedaron ahí, (4) el resultado neto.
+function conclusionHtml(data){
+  const topAnom = data.anomalies[0];
+  let s = topAnom
+    ? `La anomalía más relevante del periodo fue en <b>${topAnom.cuenta}</b> (${topAnom.cmayor}) durante <b>${topAnom.mes}</b>, con ${fmtCOP(topAnom.importe)} COP` +
+      (topAnom.pctChange!=null ? ` (${topAnom.pctChange>=0?'+':''}${topAnom.pctChange.toFixed(0)}% vs. mes anterior)` : ' (nueva, sin mes anterior comparable)') +
+      `, asociada principalmente a ${topAnom.personalList[0]}. `
+    : 'No se detectaron saltos de costo estadísticamente relevantes en el periodo analizado. ';
+  if(data.ingresoDrop){
+    const d = data.ingresoDrop;
+    s += `Los ingresos cayeron ${d.pctDrop.toFixed(0)}% a partir de <b>${d.mes}</b> (venían de ${fmtCOP(d.fromValue)} COP/mes) y no se recuperaron en el resto del periodo analizado. `;
+  }
+  data.categoryDrops.forEach(cd=>{
+    s += `El costo de <b>${cd.cmayor}</b> cayó ${cd.pctDrop.toFixed(0)}% a partir de <b>${cd.mes}</b> (venía de ${fmtCOP(cd.fromValue)} COP/mes) y se mantuvo en ese nivel bajo el resto del periodo. `;
+  });
+  s += data.margen>=0
+    ? `El resultado del periodo fue positivo: ${fmtCOP(data.margen)} COP.`
+    : `El resultado del periodo fue negativo: ${fmtCOP(data.margen)} COP (los costos superaron los ingresos).`;
+  return s;
+}
+function conclusionPlain(data){
+  return conclusionHtml(data).replace(/<\/?b>/g, '');
 }
 
 function generateAndShowReport(){
@@ -2094,15 +2188,7 @@ function generateAndShowReport(){
 }
 
 function renderReportModal(data){
-  const topAnom = data.anomalies[0];
-  const conclusion = topAnom
-    ? `La anomalía más relevante del periodo fue en <b>${topAnom.cuenta}</b> (${topAnom.cmayor}) durante <b>${topAnom.mes}</b>, con ${fmtCOP(topAnom.importe)} COP` +
-      (topAnom.pctChange!=null ? ` (${topAnom.pctChange>=0?'+':''}${topAnom.pctChange.toFixed(0)}% vs. mes anterior)` : ' (nueva, sin mes anterior comparable)') +
-      `, asociada principalmente a ${topAnom.personalList[0]}. `
-    : 'No se detectaron saltos de costo estadísticamente relevantes en el periodo analizado. ';
-  const resultText = data.margen>=0
-    ? `El resultado del periodo fue positivo: ${fmtCOP(data.margen)} COP.`
-    : `El resultado del periodo fue negativo: ${fmtCOP(data.margen)} COP (los costos superaron los ingresos).`;
+  const conclusion = conclusionHtml(data);
 
   const anomHtml = data.anomalies.length ? `
     <div class="mini-table-wrap">
@@ -2133,7 +2219,7 @@ function renderReportModal(data){
     <h4>⚠ Principales anomalías detectadas (saltos grandes de costo)</h4>
     ${anomHtml}
     <h4>Conclusiones</h4>
-    <p style="font-size:12.5px; line-height:1.6;">${conclusion}${resultText}</p>
+    <p style="font-size:12.5px; line-height:1.6;">${conclusion}</p>
     <div style="margin-top:16px; display:flex; gap:10px;">
       <button class="btn" id="btnWizardBack3">‹ Volver</button>
       <button class="upload-label" id="btnDownloadPDF" style="border:none; cursor:pointer;">📥 Descargar PDF</button>
@@ -2249,13 +2335,7 @@ function exportReportPDF(data){
   if(y > doc.internal.pageSize.getHeight()-100){ doc.addPage(); y = 40; }
   doc.setFontSize(11); doc.setFont(undefined,'bold'); doc.setTextColor(20); doc.text('Conclusiones', 40, y); y += 16;
   doc.setFontSize(9.5); doc.setFont(undefined,'normal');
-  const topAnom = data.anomalies[0];
-  const conclusionText = (topAnom
-    ? `La anomalia mas relevante del periodo fue en ${topAnom.cuenta} (${topAnom.cmayor}) durante ${topAnom.mes}, con ${fmtCOP(topAnom.importe)} COP` +
-      (topAnom.pctChange!=null ? ` (${topAnom.pctChange>=0?'+':''}${topAnom.pctChange.toFixed(0)}% vs. mes anterior)` : ' (nueva, sin mes anterior comparable)') +
-      `, asociada principalmente a ${topAnom.personalList[0]}. `
-    : 'No se detectaron saltos de costo estadisticamente relevantes en el periodo analizado. ') +
-    (data.margen>=0 ? `El resultado del periodo fue positivo: ${fmtCOP(data.margen)} COP.` : `El resultado del periodo fue negativo: ${fmtCOP(data.margen)} COP (los costos superaron los ingresos).`);
+  const conclusionText = conclusionPlain(data);
   const wrapped = doc.splitTextToSize(conclusionText, pageW-80);
   doc.text(wrapped, 40, y);
 
