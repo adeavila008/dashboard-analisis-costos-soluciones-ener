@@ -238,6 +238,13 @@ input:checked + .slider:before{transform:translateX(16px);}
 .pivot-anom:hover{background:rgba(255,23,68,.28);}
 .report-anom-row{cursor:pointer;}
 .report-anom-row:hover td{background:rgba(79,140,255,.14);}
+.sem-badge{display:inline-block; min-width:52px; text-align:center; padding:3px 10px; border-radius:20px; font-weight:700; font-size:12px;}
+.sem-green{background:rgba(34,197,139,.18); color:var(--accent2); border:1px solid rgba(34,197,139,.4);}
+.sem-amber{background:rgba(255,182,72,.18); color:var(--warn); border:1px solid rgba(255,182,72,.4);}
+.sem-red{background:rgba(255,92,114,.18); color:var(--danger); border:1px solid rgba(255,92,114,.4);}
+.sem-na{background:rgba(147,160,189,.12); color:var(--muted); border:1px solid var(--border);}
+.salud-resumen-row{cursor:pointer;}
+.salud-resumen-row:hover td{background:rgba(79,140,255,.14);}
 .btn-back-modal{background:none; border:1px solid var(--border); color:var(--text); border-radius:8px; padding:6px 12px; font-size:12px; cursor:pointer; margin-bottom:12px;}
 .btn-back-modal:hover{border-color:var(--accent); color:var(--accent);}
 .expand-btn{background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; margin-left:auto; flex-shrink:0;}
@@ -472,6 +479,19 @@ input:checked + .slider:before{transform:translateX(16px);}
 
   <div id="bannerSaludOk" class="banner ok"></div>
   <div id="bannerSaludErr" class="banner err"></div>
+
+  <div class="panel">
+    <h2>Resumen de salud por proyecto <span class="tag">estilo semáforo · clic en una fila para ver el detalle del proyecto</span></h2>
+    <div class="filters" style="margin-bottom:12px;">
+      <div class="f-group">
+        <label>Mes de corte</label>
+        <select id="selSaludResumenMes"></select>
+      </div>
+    </div>
+    <div class="mini-table-wrap tbl-scroll" style="max-height:420px;">
+      <table class="mini-table" id="saludResumenTable"></table>
+    </div>
+  </div>
 
   <div class="panel">
     <h2>Proyectos <span class="tag" id="lblSaludCount"></span></h2>
@@ -1245,6 +1265,7 @@ document.getElementById('backToSplashBtn').addEventListener('click', ()=> showOv
 document.getElementById('navFinanciero').addEventListener('click', ()=> showModule('financiero'));
 document.getElementById('navSalud').addEventListener('click', ()=> showModule('salud'));
 document.getElementById('btnSaludReset').addEventListener('click', ()=>{ if(saludState.ceco) saludSetProject(saludState.ceco); });
+document.getElementById('selSaludResumenMes').addEventListener('change', renderSaludResumenTable);
 
 // metadata captured per render, used by chart click handlers to know what was clicked
 let trendMeta = null;   // {keys, labels, ing, dir, otr, totalCost, rows}
@@ -1457,6 +1478,7 @@ function saludFilteredRows(){
 }
 
 function renderSaludAll(){
+  renderSaludResumenTable();
   renderSaludProjectChips();
   renderSaludFilterChips();
   const rows = saludFilteredRows();
@@ -1639,6 +1661,71 @@ function renderSaludComentarios(rows){
   document.getElementById('saludComentarios').innerHTML = meta + (items.length
     ? items.map(([k,v])=>`<p><b>${k}:</b> ${escAttr(v)}</p>`).join('')
     : '<p class="psum-empty">Sin comentarios registrados para el último mes.</p>');
+}
+
+// ---------- tabla resumen (semáforo) de CPI/SPI por proyecto, para un mes de corte ----------
+function semaforo(v){
+  if(v==null) return {cls:'sem-na', txt:'N/D'};
+  if(v>=1) return {cls:'sem-green', txt:v.toFixed(2)};
+  if(v>=0.9) return {cls:'sem-amber', txt:v.toFixed(2)};
+  return {cls:'sem-red', txt:v.toFixed(2)};
+}
+
+function renderSaludResumenMesOptions(){
+  const sel = document.getElementById('selSaludResumenMes');
+  const prevVal = sel.value;
+  const meses = [...new Set(EVM_RECORDS.map(r=>r.mes))].sort();
+  sel.innerHTML = meses.map(m=>`<option value="${m}">${m}</option>`).join('');
+  // mantener el mes elegido si sigue existiendo; si no, usar el más reciente
+  sel.value = meses.includes(prevVal) ? prevVal : meses[meses.length-1];
+}
+
+function renderSaludResumenTable(){
+  renderSaludResumenMesOptions();
+  const mes = document.getElementById('selSaludResumenMes').value;
+  const cecos = [...new Set(EVM_RECORDS.map(r=>r.ceco))];
+  let rowsData = cecos.map(ceco=>{
+    const r = EVM_RECORDS.find(x=>x.ceco===ceco && x.mes===mes);
+    return {
+      ceco,
+      proyecto: r ? (r.proyecto||ceco) : (saludRowsFor(ceco)[0]?.proyecto || ceco),
+      cliente: r ? r.cliente : '',
+      estado: r ? r.estado : '',
+      cpi: r ? r.cpi : null,
+      spi: r ? r.spi : null,
+      avanceReal: r ? r.avanceReal : null,
+    };
+  });
+  // proyectos con peor desempeño primero (CPI más bajo); los sin dato para ese mes, al final
+  rowsData.sort((a,b)=>{
+    if(a.cpi==null && b.cpi==null) return 0;
+    if(a.cpi==null) return 1;
+    if(b.cpi==null) return -1;
+    return a.cpi - b.cpi;
+  });
+
+  const table = document.getElementById('saludResumenTable');
+  const head = `<thead><tr><th>Proyecto</th><th>Cliente</th><th>Estado</th><th class="num">Avance real</th><th class="num">CPI</th><th class="num">SPI</th></tr></thead>`;
+  const body = rowsData.map(r=>{
+    const cpiSem = semaforo(r.cpi);
+    const spiSem = semaforo(r.spi);
+    return `<tr class="salud-resumen-row" data-ceco="${escAttr(r.ceco)}" title="Clic para ver el detalle de ${escAttr(r.ceco)}">
+      <td><b>${escAttr(r.ceco)}</b><br><span style="color:var(--muted); font-size:11px;">${escAttr(r.proyecto)}</span></td>
+      <td>${escAttr(r.cliente)}</td>
+      <td>${escAttr(r.estado)}</td>
+      <td class="num">${r.avanceReal!=null ? r.avanceReal.toFixed(0)+'%' : '—'}</td>
+      <td class="num"><span class="sem-badge ${cpiSem.cls}">${cpiSem.txt}</span></td>
+      <td class="num"><span class="sem-badge ${spiSem.cls}">${spiSem.txt}</span></td>
+    </tr>`;
+  }).join('');
+  table.innerHTML = head + '<tbody>' + body + '</tbody>';
+
+  table.querySelectorAll('.salud-resumen-row').forEach(tr=>{
+    tr.onclick = ()=>{
+      saludSetProject(tr.getAttribute('data-ceco'));
+      document.getElementById('saludKpiRow').scrollIntoView({behavior:'smooth', block:'center'});
+    };
+  });
 }
 
 function groupSum(rows, keyFn, valFn){
