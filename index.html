@@ -451,6 +451,19 @@ input:checked + .slider:before{transform:translateX(16px);}
   <div class="panel">
     <h2>Proyectos <span class="tag" id="lblSaludCount"></span></h2>
     <div class="chips" id="chipsSaludProy"></div>
+    <div class="filters" style="margin-top:14px;">
+      <div class="f-group">
+        <label>Año</label>
+        <div class="chips" id="chipsSaludAnio"></div>
+      </div>
+      <div class="f-group">
+        <label>Mes</label>
+        <div class="chips" id="chipsSaludMes"></div>
+      </div>
+      <div class="f-group">
+        <button class="btn" id="btnSaludReset">Limpiar filtros</button>
+      </div>
+    </div>
   </div>
 
   <div class="panel">
@@ -1043,6 +1056,7 @@ const valueLabelsPlugin = {
       const isArc = meta.type === 'doughnut' || meta.type === 'pie';
       const isLine = meta.type === 'line';
       const arcTotal = isArc ? ds.data.reduce((s,v)=>s+Math.abs(v||0),0) : 0;
+      let lastLabelX = -Infinity; // para líneas con muchos puntos: evita amontonar etiquetas muy juntas
       meta.data.forEach((el, i)=>{
         const raw = ds.data[i];
         if(raw===undefined || raw===null || raw===0) return;
@@ -1063,6 +1077,10 @@ const valueLabelsPlugin = {
           // la línea (ej. Costo total) no vive dentro de una columna angosta, así que su
           // etiqueta se queda horizontal. Las líneas secundarias (ej. Margen %) se colocan
           // debajo del punto en vez de encima, para no chocar con la línea principal.
+          // Si la serie tiene muchos puntos muy juntos (ds.valueLabelMinGap), se omiten
+          // las etiquetas que quedarían pegadas a la anterior, para no verse amontonadas.
+          if(ds.valueLabelMinGap && (el.x - lastLabelX) < ds.valueLabelMinGap) return;
+          lastLabelX = el.x;
           const below = ds.valueLabelBelow === true;
           ctx.textAlign='center'; ctx.textBaseline = below ? 'top' : 'bottom';
           drawLabelWithHalo(ctx, text, el.x, el.y + (below ? 8 : -10), false, ds.valueLabelColor, ds.valueLabelFont);
@@ -1199,6 +1217,7 @@ document.getElementById('btnGoSalud').addEventListener('click', ()=> showModule(
 document.getElementById('btnGoHome2').addEventListener('click', ()=> showOverlay('splashScreen'));
 document.getElementById('btnGoFinanciero2').addEventListener('click', ()=> showModule('financiero'));
 document.getElementById('btnGoSalud2').addEventListener('click', ()=> showModule('salud'));
+document.getElementById('btnSaludReset').addEventListener('click', ()=>{ if(saludState.ceco) saludSetProject(saludState.ceco); });
 
 // metadata captured per render, used by chart click handlers to know what was clicked
 let trendMeta = null;   // {keys, labels, ing, dir, otr, totalCost, rows}
@@ -1312,26 +1331,32 @@ function openModal(title, sub, bodyHtml){
 // Datos ya vienen calculados desde el Excel de líneas base (build_evm_data.py):
 // cada mes ya trae el avance/costo PLANEADO vigente (la línea base más reciente
 // entre LB1..LB4) y el avance/costo REAL, más CPI/SPI/EV ya calculados.
-let saludState = { ceco: null };
+let saludState = { ceco: null, anios: new Set(), meses: new Set() };
 
 function saludRowsFor(ceco){
   return EVM_RECORDS.filter(r=>r.ceco===ceco).sort((a,b)=> a.mes<b.mes?-1:(a.mes>b.mes?1:0));
 }
 
-function initSalud(){
-  if(!saludState.ceco && EVM_RECORDS.length){
-    let best = null, bestMes = '';
-    [...new Set(EVM_RECORDS.map(r=>r.ceco))].forEach(ceco=>{
-      const rows = saludRowsFor(ceco);
-      const lastMes = rows.length ? rows[rows.length-1].mes : '';
-      if(lastMes > bestMes){ bestMes = lastMes; best = ceco; }
-    });
-    saludState.ceco = best;
-  }
+// cambia de proyecto y reinicia los filtros de Año/Mes a "todos" (los disponibles para ese proyecto)
+function saludSetProject(ceco){
+  saludState.ceco = ceco;
+  const rows = saludRowsFor(ceco);
+  saludState.anios = new Set(rows.map(r=>r.mes.slice(0,4)));
+  saludState.meses = new Set(rows.map(r=>parseInt(r.mes.slice(5,7),10)));
   renderSaludAll();
 }
 
-function renderSaludChips(){
+function initSalud(){
+  let best = null, bestMes = '';
+  [...new Set(EVM_RECORDS.map(r=>r.ceco))].forEach(ceco=>{
+    const rows = saludRowsFor(ceco);
+    const lastMes = rows.length ? rows[rows.length-1].mes : '';
+    if(lastMes > bestMes){ bestMes = lastMes; best = ceco; }
+  });
+  saludSetProject(best);
+}
+
+function renderSaludProjectChips(){
   const cecos = [...new Set(EVM_RECORDS.map(r=>r.ceco))];
   document.getElementById('lblSaludCount').textContent = cecos.length + ' proyectos con seguimiento';
   const box = document.getElementById('chipsSaludProy');
@@ -1342,14 +1367,41 @@ function renderSaludChips(){
     return `<div class="chip ${active}" data-ceco="${escAttr(c)}" title="${escAttr(proyN)}">${escAttr(c)}</div>`;
   }).join('');
   box.querySelectorAll('.chip').forEach(el=>{
-    el.onclick = ()=>{ saludState.ceco = el.getAttribute('data-ceco'); renderSaludAll(); };
+    el.onclick = ()=>{ saludSetProject(el.getAttribute('data-ceco')); };
+  });
+}
+
+function renderSaludFilterChips(){
+  const allRows = saludRowsFor(saludState.ceco);
+  const allAnios = [...new Set(allRows.map(r=>r.mes.slice(0,4)))].sort();
+  const allMeses = [...new Set(allRows.map(r=>parseInt(r.mes.slice(5,7),10)))].sort((a,b)=>a-b);
+
+  buildChips('chipsSaludAnio', allAnios, y=>y, saludState.anios, y=>{
+    if(saludState.anios.has(y)) saludState.anios.delete(y); else saludState.anios.add(y);
+    renderSaludAll();
+  });
+  buildChips('chipsSaludMes', allMeses, m=>MONTH_NAMES[m], saludState.meses, m=>{
+    if(saludState.meses.has(m)) saludState.meses.delete(m); else saludState.meses.add(m);
+    renderSaludAll();
+  });
+}
+
+function saludFilteredRows(){
+  return saludRowsFor(saludState.ceco).filter(r=>{
+    const y = r.mes.slice(0,4);
+    const m = parseInt(r.mes.slice(5,7),10);
+    return saludState.anios.has(y) && saludState.meses.has(m);
   });
 }
 
 function renderSaludAll(){
-  renderSaludChips();
-  const rows = saludRowsFor(saludState.ceco);
-  if(!rows.length) return;
+  renderSaludProjectChips();
+  renderSaludFilterChips();
+  const rows = saludFilteredRows();
+  if(!rows.length){
+    document.getElementById('saludKpiRow').innerHTML = '<p class="psum-empty">No hay datos para este proyecto con los filtros seleccionados.</p>';
+    return;
+  }
   renderSaludKPIs(rows);
   renderSaludCurvaAvance(rows);
   renderSaludCurvaCosto(rows);
@@ -1412,7 +1464,7 @@ function renderSaludCurvaAvance(rows){
       labels,
       datasets:[
         {type:'line', label:'Avance planeado %', data: rows.map(r=>r.avancePlan), borderColor:'rgba(147,160,189,.6)', borderDash:[5,4], borderWidth:1.5, pointRadius:2, tension:.3, spanGaps:true, order:2},
-        {type:'line', label:'Avance real %', data: rows.map(r=>r.avanceReal), borderColor:'#22c58b', backgroundColor:'rgba(34,197,139,.12)', borderWidth:2, fill:true, tension:.3, pointRadius:4, spanGaps:true, order:1, isPercent:true}
+        {type:'line', label:'Avance real %', data: rows.map(r=>r.avanceReal), borderColor:'#22c58b', backgroundColor:'rgba(34,197,139,.12)', borderWidth:2, fill:true, tension:.3, pointRadius:4, spanGaps:true, order:1, isPercent:true, valueLabelMinGap:45}
       ]
     },
     options:{
@@ -1446,7 +1498,7 @@ function renderSaludCurvaCosto(rows){
       labels,
       datasets:[
         {type:'line', label:'Costo planeado acum.', data: rows.map(r=>r.costoPlanAcum), borderColor:'rgba(147,160,189,.6)', borderDash:[5,4], borderWidth:1.5, pointRadius:2, tension:.3, spanGaps:true, order:2},
-        {type:'line', label:'Costo real acum.', data: rows.map(r=>r.costoRealAcum), borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.12)', borderWidth:2, fill:true, tension:.3, pointRadius:4, spanGaps:true, order:1}
+        {type:'line', label:'Costo real acum.', data: rows.map(r=>r.costoRealAcum), borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.12)', borderWidth:2, fill:true, tension:.3, pointRadius:4, spanGaps:true, order:1, valueLabelMinGap:50}
       ]
     },
     options:{
@@ -1482,8 +1534,8 @@ function renderSaludCpiSpi(rows){
       labels,
       datasets:[
         {type:'line', label:'Meta 1.0', data: rows.map(()=>1), borderColor:'rgba(147,160,189,.5)', borderDash:[4,4], borderWidth:1, pointRadius:0, order:3},
-        {type:'line', label:'CPI', data: cpiVals, borderColor:'#4f8cff', borderWidth:2, tension:.3, pointRadius:3, spanGaps:true, order:1, isIndex:true},
-        {type:'line', label:'SPI', data: spiVals, borderColor:'#ffb648', borderWidth:2, tension:.3, pointRadius:3, spanGaps:true, order:2, isIndex:true, valueLabelBelow:true}
+        {type:'line', label:'CPI', data: cpiVals, borderColor:'#4f8cff', borderWidth:2, tension:.3, pointRadius:3, spanGaps:true, order:1, isIndex:true, valueLabelMinGap:50},
+        {type:'line', label:'SPI', data: spiVals, borderColor:'#ffb648', borderWidth:2, tension:.3, pointRadius:3, spanGaps:true, order:2, isIndex:true, valueLabelBelow:true, valueLabelMinGap:50}
       ]
     },
     options:{
