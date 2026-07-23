@@ -1371,19 +1371,46 @@ function renderSaludProjectChips(){
   });
 }
 
+// Chip "Todos" + selección inteligente: si ya está todo seleccionado, hacer clic en un
+// valor específico AISLA la selección a solo ese valor (en vez de dejar "todos menos uno"),
+// que es el flujo que de verdad se usa (ej. "quiero ver solo 2026 y Junio"). Clics
+// posteriores sobre otros valores sí se acumulan (multi-selección normal).
+function saludToggleFilterValue(set, value, allValues){
+  const allSelected = set.size === allValues.length;
+  if(allSelected){
+    set.clear();
+    set.add(value);
+  } else if(set.has(value)){
+    set.delete(value);
+    if(set.size===0) allValues.forEach(v=>set.add(v)); // no dejar la selección vacía
+  } else {
+    set.add(value);
+  }
+}
+
+function renderSaludChipGroup(containerId, values, labelFn, activeSet, onToggle, onSelectAll){
+  const el = document.getElementById(containerId);
+  const allSelected = activeSet.size === values.length;
+  el.innerHTML = `<div class="chip${allSelected?' active':''}" data-all="1">Todos</div>` +
+    values.map(v=>`<div class="chip${activeSet.has(v)?' active':''}">${escAttr(labelFn(v))}</div>`).join('');
+  el.querySelector('[data-all]').onclick = onSelectAll;
+  [...el.children].slice(1).forEach((chip, i)=>{ chip.onclick = ()=> onToggle(values[i]); });
+}
+
 function renderSaludFilterChips(){
   const allRows = saludRowsFor(saludState.ceco);
   const allAnios = [...new Set(allRows.map(r=>r.mes.slice(0,4)))].sort();
   const allMeses = [...new Set(allRows.map(r=>parseInt(r.mes.slice(5,7),10)))].sort((a,b)=>a-b);
 
-  buildChips('chipsSaludAnio', allAnios, y=>y, saludState.anios, y=>{
-    if(saludState.anios.has(y)) saludState.anios.delete(y); else saludState.anios.add(y);
+  renderSaludChipGroup('chipsSaludAnio', allAnios, y=>y, saludState.anios, y=>{
+    saludToggleFilterValue(saludState.anios, y, allAnios);
     renderSaludAll();
-  });
-  buildChips('chipsSaludMes', allMeses, m=>MONTH_NAMES[m], saludState.meses, m=>{
-    if(saludState.meses.has(m)) saludState.meses.delete(m); else saludState.meses.add(m);
+  }, ()=>{ saludState.anios = new Set(allAnios); renderSaludAll(); });
+
+  renderSaludChipGroup('chipsSaludMes', allMeses, m=>MONTH_NAMES[m], saludState.meses, m=>{
+    saludToggleFilterValue(saludState.meses, m, allMeses);
     renderSaludAll();
-  });
+  }, ()=>{ saludState.meses = new Set(allMeses); renderSaludAll(); });
 }
 
 function saludFilteredRows(){
