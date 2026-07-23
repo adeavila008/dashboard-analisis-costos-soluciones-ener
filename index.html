@@ -1435,6 +1435,12 @@ function renderSaludAll(){
   const rows = saludFilteredRows();
   if(!rows.length){
     document.getElementById('saludKpiRow').innerHTML = '<p class="psum-empty">No hay datos para este proyecto con los filtros seleccionados.</p>';
+    // las gráficas y comentarios deben limpiarse también; si no, se quedan mostrando
+    // los datos de la última selección válida aunque el filtro actual esté vacío.
+    destroyChart('saludAvance');
+    destroyChart('saludCosto');
+    destroyChart('saludCpiSpi');
+    document.getElementById('saludComentarios').innerHTML = '';
     return;
   }
   renderSaludKPIs(rows);
