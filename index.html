@@ -463,7 +463,15 @@ input:checked + .slider:before{transform:translateX(16px);}
         <p class="subtitle">CPI, SPI y Curva S: avance planificado vs. avance real de cada proyecto</p>
       </div>
     </div>
+    <div class="upload-box">
+      <label class="upload-label" for="fileInputSalud">⭱ Cargar Excel de líneas base</label>
+      <input type="file" id="fileInputSalud" accept=".xlsx,.xls">
+      <div class="upload-info">Sube el consolidado de líneas base (hoja "DATA", mismo formato del archivo con CPI/SPI/Curva S por proyecto). Se procesa en tu navegador y reemplaza los datos de este módulo.</div>
+    </div>
   </div>
+
+  <div id="bannerSaludOk" class="banner ok"></div>
+  <div id="bannerSaludErr" class="banner err"></div>
 
   <div class="panel">
     <h2>Proyectos <span class="tag" id="lblSaludCount"></span></h2>
@@ -3010,6 +3018,162 @@ document.getElementById('fileInput').addEventListener('change', function(e){
       }
     }catch(err){
       showBanner('bannerErr', '⚠ Error leyendo el archivo: ' + err.message);
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+// ---------- carga de Excel de líneas base (módulo Salud de Proyectos) ----------
+// Replica en el navegador la misma lógica de build_evm_data.py: localizar la hoja
+// "DATA", usar siempre la línea base MÁS RECIENTE que tenga valor en cada fila
+// (LB4 > LB3 > LB2 > LB1) como "el plan vigente", y recortar meses futuros (sin
+// avance real reportado) para no graficar caídas falsas a cero.
+function showSaludBanner(id, msg){
+  ['bannerSaludOk','bannerSaludErr'].forEach(b=>{ document.getElementById(b).style.display='none'; });
+  const el = document.getElementById(id);
+  el.innerHTML = msg;
+  el.style.display = 'block';
+}
+
+function normHeader(s){ return String(s==null?'':s).replace(/\s+/g,' ').trim(); }
+
+function findEvmSheet(wb){
+  for(const sheetName of wb.SheetNames){
+    const sheet = wb.Sheets[sheetName];
+    const aoa = XLSX.utils.sheet_to_json(sheet, {header:1, raw:true, defval:null});
+    if(!aoa.length) continue;
+    const headers = aoa[0].map(normHeader);
+    if(headers.includes('Ceco') && headers.includes('Mes') && headers.includes('CPI (Cost performance index)')){
+      return {headers, dataRows: aoa.slice(1)};
+    }
+  }
+  return null;
+}
+
+function evmNum(v){
+  if(v==null) return null;
+  if(typeof v==='string'){ v = v.trim(); if(v==='') return null; v = parseFloat(v); }
+  if(typeof v!=='number' || isNaN(v)) return null;
+  return v;
+}
+function evmCoalesce(...vals){
+  for(let i=vals.length-1;i>=0;i--){ if(vals[i]!=null) return vals[i]; }
+  return null;
+}
+function evmDateStr(v){
+  if(v==null) return null;
+  if(v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString().slice(0,10);
+  if(typeof v==='number') return excelSerialToISO(v);
+  return null;
+}
+function evmMesKey(v){
+  if(v instanceof Date && !isNaN(v.getTime())) return v.getFullYear()+'-'+String(v.getMonth()+1).padStart(2,'0');
+  if(typeof v==='number'){
+    const iso = excelSerialToISO(v);
+    return iso ? iso.slice(0,7) : null;
+  }
+  return null;
+}
+
+function parseEvmWorkbook(wb){
+  const found = findEvmSheet(wb);
+  if(!found) return null;
+  const { headers, dataRows } = found;
+  const idx = {};
+  headers.forEach((h,i)=>{ if(!(h in idx)) idx[h] = i; });
+  const g = (row, name) => (idx[name]!=null ? row[idx[name]] : undefined);
+
+  const records = [];
+  dataRows.forEach(row=>{
+    if(!row) return;
+    const cecoRaw = g(row,'Ceco');
+    if(cecoRaw==null || String(cecoRaw).trim()==='') return;
+    const mesKey = evmMesKey(g(row,'Mes'));
+    if(!mesKey) return;
+
+    const avancePlan = evmCoalesce(evmNum(g(row,'Avance Planeado LB 1%')), evmNum(g(row,'Avance Planeado LB 2%')), evmNum(g(row,'Avance Planeado LB 3%')), evmNum(g(row,'Avance Planeado LB 4%')));
+    const avanceReal = evmNum(g(row,'Avance Real %'));
+    const presupuesto = evmCoalesce(evmNum(g(row,'Presupuesto MCOP')), evmNum(g(row,'Presupuesto MCOP LB2')), evmNum(g(row,'Presupuesto MCOP LB3')), evmNum(g(row,'Presupuesto MCOP LB4')));
+    const costoPlanAcum = evmCoalesce(evmNum(g(row,'Costo Planeado Acum MCOP LB1')), evmNum(g(row,'Costo Planeado Acum MCOP LB2')), evmNum(g(row,'Costo Planeado Acum MCOP LB3')), evmNum(g(row,'Costo Planeado Acum MCOP LB4')));
+    const costoRealAcum = evmNum(g(row,'Costo Real Acum MCOP'));
+    const facturaPlanAcum = evmCoalesce(evmNum(g(row,'Facturación Planeado Acum MCOP LB1')), evmNum(g(row,'Facturación Planeado Acum MCOP LB2')), evmNum(g(row,'Facturación Planeado Acum MCOP LB3')), evmNum(g(row,'Facturación Planeado Acum MCOP LB4')));
+    const facturaRealAcum = evmNum(g(row,'Facturación Real Acum MCOP'));
+
+    const cpi = evmNum(g(row,'CPI (Cost performance index)'));
+    const spi = evmNum(g(row,'SPI (Schedule performance index)'));
+    const ev = evmNum(g(row,'EV (Valor ganado) MCOP'));
+    const cv = evmNum(g(row,'CV (Variación Costo) MCOP'));
+    const cvPct = evmNum(g(row,'CV (% Variación Costo) MCOP'));
+    const eac = evmNum(g(row,'EAC (Estimated at completion)'));
+    const etc = evmNum(g(row,'ETC (Estimate to complete)'));
+    const csi = evmNum(g(row,'CSI (Cost schedule index)'));
+
+    records.push({
+      ceco: String(cecoRaw).trim(),
+      proyecto: (g(row,'Proyecto')!=null ? String(g(row,'Proyecto')).trim() : ''),
+      gerente: (g(row,'Gerente')!=null ? String(g(row,'Gerente')).trim() : ''),
+      cliente: (g(row,'Cliente')!=null ? String(g(row,'Cliente')).trim() : ''),
+      estado: (g(row,'Estado de contrato')!=null ? String(g(row,'Estado de contrato')).trim() : ''),
+      objeto: (g(row,'Objeto')!=null ? String(g(row,'Objeto')).trim() : ''),
+      fechaInicio: evmDateStr(g(row,'Fecha Inicio')),
+      fechaFin: evmDateStr(g(row,'Fecha Fin')),
+      mes: mesKey,
+      avancePlan: avancePlan!=null ? avancePlan*100 : null,
+      avanceReal: avanceReal!=null ? avanceReal*100 : null,
+      presupuesto: presupuesto!=null ? presupuesto*1e6 : null,
+      costoPlanAcum: costoPlanAcum!=null ? costoPlanAcum*1e6 : null,
+      costoRealAcum: costoRealAcum!=null ? costoRealAcum*1e6 : null,
+      facturaPlanAcum: facturaPlanAcum!=null ? facturaPlanAcum*1e6 : null,
+      facturaRealAcum: facturaRealAcum!=null ? facturaRealAcum*1e6 : null,
+      cpi, spi,
+      ev: ev!=null ? ev*1e6 : null,
+      cv: cv!=null ? cv*1e6 : null,
+      cvPct: cvPct!=null ? cvPct*100 : null,
+      eac: eac!=null ? eac*1e6 : null,
+      etc: etc!=null ? etc*1e6 : null,
+      csi,
+      comentTiempo: (g(row,'COMENTARIO TIEMPO')!=null ? String(g(row,'COMENTARIO TIEMPO')).trim() : ''),
+      comentCostos: (g(row,'COMENTARIO COSTOS')!=null ? String(g(row,'COMENTARIO COSTOS')).trim() : ''),
+      comentFactura: (g(row,'COMENTARIOS FACTURACIÓN')!=null ? String(g(row,'COMENTARIOS FACTURACIÓN')).trim() : ''),
+    });
+  });
+
+  // recortar meses futuros por proyecto (solo dejar hasta el último mes con avance real)
+  const byCeco = {};
+  records.forEach(r=>{ (byCeco[r.ceco] = byCeco[r.ceco]||[]).push(r); });
+  const cleaned = [];
+  Object.values(byCeco).forEach(rows=>{
+    rows.sort((a,b)=> a.mes<b.mes?-1:(a.mes>b.mes?1:0));
+    const realMonths = rows.filter(r=>r.avanceReal!=null).map(r=>r.mes);
+    const lastReal = realMonths.length ? realMonths[realMonths.length-1] : null;
+    rows.forEach(r=>{ if(lastReal==null || r.mes<=lastReal) cleaned.push(r); });
+  });
+  cleaned.sort((a,b)=> a.ceco<b.ceco?-1:(a.ceco>b.ceco?1:(a.mes<b.mes?-1:(a.mes>b.mes?1:0))));
+  return cleaned;
+}
+
+document.getElementById('fileInputSalud').addEventListener('change', function(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(evt){
+    try{
+      const wb = XLSX.read(evt.target.result, {type:'array', cellDates:true});
+      const newRecords = parseEvmWorkbook(wb);
+      if(!newRecords || !newRecords.length){
+        showSaludBanner('bannerSaludErr', '⚠ No se encontró una hoja con el formato esperado (columnas "Ceco", "Mes" y "CPI"). Verifica que sea el mismo archivo de líneas base.');
+        return;
+      }
+      EVM_RECORDS.length = 0;
+      EVM_RECORDS.push(...newRecords);
+      const projCount = new Set(newRecords.map(r=>r.ceco)).size;
+      // si el proyecto que se estaba viendo ya no existe en el archivo nuevo, initSalud() elige otro
+      if(!newRecords.some(r=>r.ceco===saludState.ceco)){ saludState.ceco = null; }
+      if(saludState.ceco){ saludSetProject(saludState.ceco); } else { initSalud(); }
+      showSaludBanner('bannerSaludOk', `✓ Cargado <b>${file.name}</b>: ${newRecords.length} filas de ${projCount} proyectos.`);
+    }catch(err){
+      showSaludBanner('bannerSaludErr', '⚠ Error leyendo el archivo: ' + err.message);
       console.error(err);
     }
   };
