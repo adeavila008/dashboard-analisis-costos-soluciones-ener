@@ -2137,7 +2137,16 @@ function monthlyAgg(rows){
   const dir = keys.map(k => rows.filter(r=>monthKey(r)===k && r.eri==='02 Costos Directos').reduce((s,r)=>s+r.importe,0));
   const otr = keys.map(k => rows.filter(r=>monthKey(r)===k && r.eri==='03 Otros Costos').reduce((s,r)=>s+r.importe,0));
   const mgn = keys.map((k,i)=> ing[i] ? ((ing[i]-(dir[i]+otr[i]))/ing[i]*100) : null);
-  return {keys, ing, dir, otr, mgn};
+  // margen acumulado: (Ingresos acumulados - Costos acumulados) / Ingresos acumulados, mes a mes.
+  // Es más estable que el margen mensual (que puede dispararse cuando un mes tiene poco o ningún
+  // ingreso facturado aunque sí haya costos), porque va promediando el desempeño desde el inicio.
+  let ingAcum = 0, costAcum = 0;
+  const mgnAcum = keys.map((k,i)=>{
+    ingAcum += ing[i];
+    costAcum += (dir[i]+otr[i]);
+    return ingAcum ? ((ingAcum-costAcum)/ingAcum*100) : null;
+  });
+  return {keys, ing, dir, otr, mgn, mgnAcum};
 }
 
 function renderTrend(rows){
@@ -2238,12 +2247,13 @@ function renderTrend(rows){
 }
 
 function renderMargin(rows){
-  const {keys, ing, dir, otr, mgn} = monthlyAgg(rows);
+  const {keys, ing, dir, otr, mgn, mgnAcum} = monthlyAgg(rows);
   const labels = keys.map(k=>{ const [y,m] = k.split('-'); return MONTH_NAMES[parseInt(m,10)]+' '+y; });
   const META = 30;
   const pointColors = mgn.map(v=> v==null ? '#93a0bd' : (v>=META ? '#22c58b' : (v>=0 ? '#ffb648' : '#ff5c72')));
+  const pointColorsAcum = mgnAcum.map(v=> v==null ? '#93a0bd' : (v>=META ? '#22c58b' : (v>=0 ? '#ffb648' : '#ff5c72')));
 
-  marginMeta = {keys, labels, mgn, ing, dir, otr, rows};
+  marginMeta = {keys, labels, mgn, mgnAcum, ing, dir, otr, rows};
 
   destroyChart('margin');
   const ctx = document.getElementById('chartMargin');
@@ -2252,7 +2262,8 @@ function renderMargin(rows){
       labels,
       datasets: [
         {type:'line', label:'Meta 30%', data: keys.map(()=>META), borderColor:'rgba(147,160,189,.5)', borderDash:[4,4], borderWidth:1, pointRadius:0, order:2},
-        {type:'line', label:'Margen %', data: mgn, borderColor:'#38bdf8', backgroundColor:'rgba(56,189,248,.12)', borderWidth:2, tension:.3, order:1, fill:true, spanGaps:true, pointRadius:5, pointBackgroundColor:pointColors, pointBorderColor:pointColors, isPercent:true}
+        {type:'line', label:'Margen %', data: mgn, borderColor:'#38bdf8', backgroundColor:'rgba(56,189,248,.12)', borderWidth:2, tension:.3, order:1, fill:true, spanGaps:true, pointRadius:5, pointBackgroundColor:pointColors, pointBorderColor:pointColors, isPercent:true, valueLabelMinGap:36},
+        {type:'line', label:'Margen acumulado %', data: mgnAcum, borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,.08)', borderWidth:2.5, tension:.25, order:0, fill:false, spanGaps:true, pointRadius:4, pointStyle:'rectRot', pointBackgroundColor:pointColorsAcum, pointBorderColor:'#a78bfa', isPercent:true, valueLabelBelow:true, valueLabelColor:'#c4b5fd', valueLabelMinGap:36}
       ]
     },
     options:{
@@ -2261,10 +2272,19 @@ function renderMargin(rows){
       interaction:{mode:'index', intersect:false},
       onClick:(evt, elements)=>{
         if(!elements.length) return;
-        const el = elements.find(e=>e.datasetIndex===1) || elements[0];
+        const el = elements.find(e=>e.datasetIndex===2) || elements.find(e=>e.datasetIndex===1) || elements[0];
         const idx = el.index;
-        const key = marginMeta.keys[idx];
         const label = marginMeta.labels[idx];
+        if(el.datasetIndex===2){
+          const pct = marginMeta.mgnAcum[idx];
+          const keysUpTo = new Set(marginMeta.keys.slice(0, idx+1));
+          const cellRows = marginMeta.rows.filter(r=>keysUpTo.has(monthKey(r)));
+          const cls = pct==null ? 'sin ingresos acumulados' : (pct>=META ? `saludable (≥ meta de ${META}%)` : (pct>=0 ? `positivo pero por debajo de la meta de ${META}%` : 'negativo (los costos acumulados superaron los ingresos acumulados)'));
+          const note = `Margen acumulado desde <b>${marginMeta.labels[0]}</b> hasta <b>${label}</b>: <b>${pct==null?'N/D':pct.toFixed(1)+'%'}</b> — ${cls}. Fórmula: (Ingresos acumulados - Costos acumulados) / Ingresos acumulados.`;
+          openBreakdownModal(`Margen acumulado — hasta ${label}`, cellRows, {note});
+          return;
+        }
+        const key = marginMeta.keys[idx];
         const pct = marginMeta.mgn[idx];
         const cellRows = marginMeta.rows.filter(r=>monthKey(r)===key);
         const cls = pct==null ? 'sin ingresos en el mes' : (pct>=META ? `saludable (≥ meta de ${META}%)` : (pct>=0 ? `positivo pero por debajo de la meta de ${META}%` : 'negativo (los costos superaron los ingresos)'));
@@ -2273,8 +2293,8 @@ function renderMargin(rows){
       },
       plugins:{
         legend:{labels:{color:'#e8ecf5', boxWidth:12, font:{size:11.5}, filter: item => item.text!=='Meta 30%'}},
-        tooltip:{filter: item => item.dataset.label!=='Meta 30%', callbacks:{label: c => 'Margen: '+(c.raw==null?'N/D':c.raw.toFixed(1)+'%')}},
-        valueLabels:{enabled:true, color:'#e8ecf5', datasets:[1]}
+        tooltip:{filter: item => item.dataset.label!=='Meta 30%', callbacks:{label: c => c.dataset.label+': '+(c.raw==null?'N/D':c.raw.toFixed(1)+'%')}},
+        valueLabels:{enabled:true, color:'#e8ecf5', datasets:[1,2]}
       },
       scales:{
         x:{ticks:{color:'#93a0bd'}, grid:{color:'#2a3350'}},
